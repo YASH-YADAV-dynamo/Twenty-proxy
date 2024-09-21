@@ -25,8 +25,8 @@ impl TwentyProxyProcessor {
     }
 
     async fn authorize_query(&self, client: &impl ClientInfo, query: &str) -> PgWireResult<()> {
-        // Implement query authorization logic here
-        // For example, check if the query is targeting the allowed schema
+        // Implement query authorization logic 
+        // example,  if the query is targeting the allowed schema
         if !query.to_lowercase().contains(&format!("schema {}", client.get_database())) {
             return Err(PgWireError::UserError(Box::new(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
