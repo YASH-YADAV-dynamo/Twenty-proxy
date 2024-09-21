@@ -1,107 +1,116 @@
-use tokio::net::TcpListener;
 use std::sync::Arc;
-use pgwire::pg_server::{PgWireListener, BoxedClientTransmitter};
-use pgwire::protocol::startup::{StartupPacket, ServerParameterProvider};
-use std::collections::HashMap;
-use std::net::SocketAddr;
+use async_trait::async_trait;
+use tokio::net::TcpListener;
+use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
+use pgwire::api::query::{PlaceholderExtendedQueryHandler, SimpleQueryHandler};
+use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
+use pgwire::api::{ClientInfo, MakeHandler, StatelessMakeHandler, Type};
+use pgwire::error::{PgWireError, PgWireResult};
+use pgwire::tokio::process_socket;
 
-struct CustomAuthProvider;
+// Struct and Implementation Definitions
+pub struct ProxyProcessor {
+    upstream_client: Client,
+}
 
-impl CustomAuthProvider {
-    fn validate_credentials(&self, user: &str, password: &str) -> bool {
-        
-        true // This should be replaced with actual validation
-    }
+#[async_trait]
+impl SimpleQueryHandler for ProxyProcessor {
+    async fn do_query<'a, C>(&self, _client: &C, query: &'a str) -> PgWireResult<Vec<Response<'a>>>
+    where
+        C: ClientInfo + Unpin + Send + Sync,
+    {
+        self.upstream_client
+            .simple_query(query)
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))
+            .map(|resp_msgs| {
+                let mut downstream_response = Vec::new();
+                let mut row_buf = Vec::new();
+                let mut field_info: Vec<FieldInfo> = Vec::new();
+                
+                for resp in resp_msgs {
+                    match resp {
+                        SimpleQueryMessage::CommandComplete(count) => {
+                            if !row_buf.is_empty() {
+                                let query_response = QueryResponse::new(field_info.clone(), row_buf.clone());
+                                downstream_response.push(Response::Query(query_response));
+                                row_buf.clear();
+                            }
+                            downstream_response.push(Response::Execution(
+                                Tag::new_for_execution("", Some(count as usize)),
+                            ));
+                        }
+                        SimpleQueryMessage::Row(row) => {
+                            if field_info.is_empty() {
+                                // Initialize field info based on row
+                                for (idx, column) in row.columns().iter().enumerate() {
+                                    field_info.push(FieldInfo::new(
+                                        column.name().to_string(),
+                                        None,
+                                        Type::VARCHAR, 
+                                        FieldFormat::Text,
+                                    ));
+                                }
+                            }
+                            
+                            let mut encoder = DataRowEncoder::new(field_info.len());
+                            for value in row.iter() {
+                                if let Some(val) = value {
+                                    encoder.encode_text(val).unwrap();
+                                } else {
+                                    encoder.encode_text("").unwrap(); 
+                                }
+                            }
+                            row_buf.push(encoder.finish());
+                        }
+                        _ => {}
+                    }
+                }
 
-    fn is_ip_whitelisted(&self, addr: &SocketAddr) -> bool {
-        
-        true // Placeholder
-    }
-
-    fn log_connection_attempt(&self, user: &str, success: bool) {
-        if success {
-            log::info!("User {} connected successfully", user);
-        } else {
-            log::error!("Failed connection attempt for user {}", user);
-        }
-    }
-    fn has_opted_in(&self, user: &str) -> bool {
-        
-        true // Replace with actual logic
-    }
-    fn authenticate_client(
-        &self,
-        startup_packet: &StartupPacket,
-        transmitter: &BoxedClientTransmitter,
-    ) -> pgwire::pg_response::PgResponse {
-        let user = startup_packet.user().to_string();
-        let password = startup_packet.password().unwrap_or_default().to_string();
-        let client_addr = transmitter.remote_addr();
-
-        if self.validate_credentials(&user, &password) && self.has_opted_in(&user) && self.is_ip_whitelisted(&client_addr) {
-            self.log_connection_attempt(&user, true);
-            pgwire::pg_response::PgResponse::empty() // Allow connection
-        } else {
-            self.log_connection_attempt(&user, false);
-            transmitter
-                .send_error_response(pgwire::protocol::error::ErrorSeverity::Fatal, "Authentication failed")
-                .await;
-            pgwire::pg_response::PgResponse::empty() // Deny connection
-        }
+                downstream_response
+            })
     }
 }
 
-
-impl ServerParameterProvider for CustomAuthProvider {
-    fn server_parameters(&self) -> HashMap<String, String> {
-        let mut params = HashMap::new();
-        params.insert("application_name".to_string(), "twenty-proxy".to_string());
-        params
-    }
-
-    fn authenticate_client(
-        &self,
-        _startup_packet: &StartupPacket,
-        _transmitter: &BoxedClientTransmitter,
-    ) -> pgwire::pg_response::PgResponse {
-        
-        
-        pgwire::pg_response::PgResponse::empty()
-    }
-}
-
+// Main Function
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
+pub async fn main() {
+    let (client, connection) = tokio_postgres::connect("host=127.0.0.1 user=postgres", NoTls)
+        .await
+        .expect("Cannot establish upstream connection");
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Upstream connection error: {}", e);
+        }
+    });
 
-    let listener = TcpListener::bind("0.0.0.0:5432").await?;
-    let pg_server = PgWireListener::new(listener, Arc::new(CustomAuthProvider));
-    pg_server.serve().await?;
+    let processor = Arc::new(StatelessMakeHandler::new(Arc::new(ProxyProcessor {
+        upstream_client: client,
+    })));
 
-    Ok(())
+    // Placeholder for extended query handler
+    let placeholder = Arc::new(StatelessMakeHandler::new(Arc::new(
+        PlaceholderExtendedQueryHandler,
+    )));
+    let authenticator = Arc::new(StatelessMakeHandler::new(Arc::new(NoopStartupHandler)));
+
+    let server_addr = "127.0.0.1:5431";
+    let listener = TcpListener::bind(server_addr).await.unwrap();
+    println!("Listening to {}", server_addr);
+    loop {
+        let incoming_socket = listener.accept().await.unwrap();
+        let authenticator_ref = authenticator.make();
+        let processor_ref = processor.make();
+        let placeholder_ref = placeholder.make();
+        tokio::spawn(async move {
+            process_socket(
+                incoming_socket.0,
+                None,
+                authenticator_ref,
+                processor_ref,
+                placeholder_ref,
+            )
+            .await
+        });
+    }
 }
-
-// Writng tests
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_validate_credentials() {
-        let provider = CustomAuthProvider {};
-        assert!(provider.validate_credentials("valid_user", "valid_password"));
-    }
-
-    #[test]
-    fn test_ip_whitelisting() {
-        let provider = CustomAuthProvider {};
-        assert!(provider.is_ip_whitelisted(&"127.0.0.1:5432".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_opt_in() {
-        let provider = CustomAuthProvider {};
-        assert!(provider.has_opted_in("valid_user"));
-    }
-}
-
