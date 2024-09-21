@@ -23,8 +23,8 @@ impl AuthenticationHandler for AuthHandler {
         _source: &AuthenticationSource,
         _params: &mut C,
     ) -> PgWireResult<()> {
-        // Implement actual authentication logic here
-        // For this example, we're just checking if the requested schema is allowed
+        // Implement actual authentication logic 
+        // we're just checking if the requested schema is allowed
         if self.config.allowed_schemas.contains(&login.database) {
             Ok(())
         } else {
