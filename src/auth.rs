@@ -23,14 +23,23 @@ impl AuthenticationHandler for AuthHandler {
         _source: &AuthenticationSource,
         _params: &mut C,
     ) -> PgWireResult<()> {
-        // Implement actual authentication logic here
-        // For this example, we're just checking if the requested schema is allowed
-        if self.config.allowed_schemas.contains(&login.database) {
+        let database = login.database();
+
+        // Check if the schema (workspace) is allowed and has opted-in for direct access
+        if self.config.allowed_schemas.contains(database) && self.config.opt_in_schemas.contains(database) {
+            // Schema is allowed and opted-in, so we allow the connection
             Ok(())
-        } else {
+        } else if !self.config.allowed_schemas.contains(database) {
+            // Schema is not in the allowed list
             Err(PgWireError::UserError(Box::new(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "Schema not allowed",
+            ))))
+        } else {
+            // Schema is allowed but has not opted-in
+            Err(PgWireError::UserError(Box::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Schema has not opted-in for direct access",
             ))))
         }
     }
