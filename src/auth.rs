@@ -23,17 +23,11 @@ impl AuthenticationHandler for AuthHandler {
         _source: &AuthenticationSource,
         _params: &mut C,
     ) -> PgWireResult<()> {
-<<<<<<< HEAD
         let database = login.database();
 
         // Check if the schema (workspace) is allowed and has opted-in for direct access
         if self.config.allowed_schemas.contains(database) && self.config.opt_in_schemas.contains(database) {
             // Schema is allowed and opted-in, so we allow the connection
-=======
-        // Implement actual authentication logic 
-        // we're just checking if the requested schema is allowed
-        if self.config.allowed_schemas.contains(&login.database) {
->>>>>>> bace7a15ffecfc68511bb37fd32fab843b3b4aba
             Ok(())
         } else if !self.config.allowed_schemas.contains(database) {
             // Schema is not in the allowed list
