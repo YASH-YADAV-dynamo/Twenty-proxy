@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use async_trait::async_trait;
-use pgwire::api::auth::{AuthenticationHandler, AuthenticationSource, LoginInfo, Password, ServerParameterProvider};
+use pgwire::api::auth::{Authentication, LoginInfo, Password, ServerParameterProvider};
 use pgwire::error::{PgWireError, PgWireResult};
 use crate::config::ProxyConfig;
 
@@ -20,7 +20,7 @@ impl AuthenticationHandler for AuthHandler {
         &self,
         login: &LoginInfo,
         _password: &Password,
-        _source: &AuthenticationSource,
+        _source: &C, // Adjusted to use ServerParameterProvider instead of AuthenticationSource
         _params: &mut C,
     ) -> PgWireResult<()> {
         let database = login.database();
